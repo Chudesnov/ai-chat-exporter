@@ -52,14 +52,15 @@ def list_recent_sessions(days: int = 7) -> list[dict]:
     cutoff = int((datetime.now().timestamp() - days * 86400) * 1000)
     
     cur.execute(
-        "SELECT id, title, time_created FROM session WHERE time_created >= ? ORDER BY time_created DESC",
+        "SELECT id, title, time_created, parent_id FROM session WHERE time_created >= ? ORDER BY time_created DESC",
         (cutoff,)
     )
     results = [
         {
             "session_id": row[0],
             "title": row[1] or "Untitled Session",
-            "time_created": row[2]
+            "time_created": row[2],
+            "parent_id": row[3]
         }
         for row in cur.fetchall()
     ]
@@ -72,19 +73,40 @@ def find_sessions_by_title(query: str) -> list[dict]:
     cur = conn.cursor()
     
     cur.execute(
-        "SELECT id, title, time_created FROM session WHERE id = ? OR title LIKE ? ORDER BY time_created DESC",
+        "SELECT id, title, time_created, parent_id FROM session WHERE id = ? OR title LIKE ? ORDER BY time_created DESC",
         (query, f"%{query}%")
     )
     results = [
         {
             "session_id": row[0],
             "title": row[1] or "Untitled Session",
-            "time_created": row[2]
+            "time_created": row[2],
+            "parent_id": row[3]
         }
         for row in cur.fetchall()
     ]
     conn.close()
     return results
+
+
+def get_related_sessions(session_id: str, parent_id: str | None) -> dict:
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    related = {"parent": None, "children": []}
+    
+    if parent_id:
+        cur.execute("SELECT id, title FROM session WHERE id = ?", (parent_id,))
+        row = cur.fetchone()
+        if row:
+            related["parent"] = {"id": row[0], "title": row[1] or "Untitled Session"}
+            
+    cur.execute("SELECT id, title FROM session WHERE parent_id = ? ORDER BY time_created ASC", (session_id,))
+    for row in cur.fetchall():
+        related["children"].append({"id": row[0], "title": row[1] or "Untitled Session"})
+        
+    conn.close()
+    return related
 
 
 def get_session_turns(session_id: str) -> list[dict]:
@@ -157,7 +179,7 @@ def get_session_turns(session_id: str) -> list[dict]:
 
 # ── Markdown Rendering ─────────────────────────────────────────────────────────
 
-def render_markdown(session: dict, turns: list[dict]) -> str:
+def render_markdown(session: dict, turns: list[dict], related: dict) -> str:
     title = session.get("title", "Untitled Session")
     session_id = session.get("session_id", "unknown")
     time_created = session.get("time_created", 0)
@@ -176,6 +198,19 @@ def render_markdown(session: dict, turns: list[dict]) -> str:
     lines.append("")
     lines.append(f"# {title}")
     lines.append("")
+
+    if related.get("parent"):
+        parent_title = related["parent"]["title"]
+        safe_parent = sanitize_filename(parent_title)
+        lines.append(f"**Parent Session:** [[{safe_parent}]]")
+        lines.append("")
+        
+    if related.get("children"):
+        lines.append("**Subagents (Child Sessions):**")
+        for child in related["children"]:
+            safe_child = sanitize_filename(child["title"])
+            lines.append(f"- [[{safe_child}]]")
+        lines.append("")
 
     for idx, turn in enumerate(turns):
         lines.append(f"## Turn {idx + 1}")
@@ -278,7 +313,8 @@ def _export_one(match: dict, args):
     print(f"Exporting: {match['title']} ({match['session_id']})…")
     
     turns = get_session_turns(match["session_id"])
-    md = render_markdown(match, turns)
+    related = get_related_sessions(match["session_id"], match["parent_id"])
+    md = render_markdown(match, turns, related)
 
     if args.output:
         out_path = args.output
