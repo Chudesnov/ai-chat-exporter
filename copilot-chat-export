@@ -432,13 +432,14 @@ def render_markdown(session: dict, title_override: str = "") -> str:
         lines.append("")
 
         if turn["tools"]:
-            lines.append("<details>")
-            lines.append(f"<summary>Tool Calls ({len(turn['tools'])})</summary>")
-            lines.append("")
+            lines.append(f"> [!info]- Tool Calls ({len(turn['tools'])})")
+            lines.append("> ")
             for tc in turn["tools"]:
-                lines.append(f"- {tc}")
-            lines.append("")
-            lines.append("</details>")
+                # If tc spans multiple lines, make sure each line has >
+                tc_lines = tc.split('\n')
+                lines.append(f"> - {tc_lines[0]}")
+                for tcl in tc_lines[1:]:
+                    lines.append(f">   {tcl}")
             lines.append("")
 
         if turn["response_texts"]:
