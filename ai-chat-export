@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""
+ai-chat-export — Unified frontend for OpenCode and Copilot chat session exporters.
+"""
+
+import argparse
+import os
+import sys
+import importlib.machinery
+from datetime import datetime
+
+def load_module(name, path):
+    loader = importlib.machinery.SourceFileLoader(name, path)
+    mod = loader.load_module()
+    return mod
+
+# Find the real directory of the file (resolving symlinks)
+script_dir = os.path.dirname(os.path.realpath(__file__))
+opencode_mod = load_module("opencode_export", os.path.join(script_dir, "opencode-chat-export"))
+copilot_mod = load_module("copilot_export", os.path.join(script_dir, "copilot-chat-export"))
+
+def normalize_copilot(session):
+    # Copilot uses 'last_message', opencode uses 'time_created'
+    session['time_created'] = session.get('last_message', 0)
+    session['source'] = 'copilot'
+    return session
+
+def normalize_opencode(session):
+    session['source'] = 'opencode'
+    return session
+
+def get_all_recent_sessions(days, sources):
+    sessions = []
+    if "opencode" in sources:
+        sessions.extend([normalize_opencode(s) for s in opencode_mod.list_recent_sessions(days)])
+    if "copilot" in sources:
+        sessions.extend([normalize_copilot(s) for s in copilot_mod.list_recent_sessions(days)])
+    
+    sessions.sort(key=lambda x: x['time_created'], reverse=True)
+    return sessions
+
+def find_all_matches(query, sources):
+    matches = []
+    if "opencode" in sources:
+        matches.extend([normalize_opencode(s) for s in opencode_mod.find_sessions_by_title(query)])
+    if "copilot" in sources:
+        matches.extend([normalize_copilot(s) for s in copilot_mod.find_sessions_by_title(query)])
+        
+    matches.sort(key=lambda x: x['time_created'], reverse=True)
+    return matches
+
+def cmd_list(args, sources):
+    sessions = get_all_recent_sessions(args.days, sources)
+    if not sessions:
+        print("No sessions found.")
+        return
+
+    print(f"Sessions from the last {args.days} day(s):\n")
+    for s in sessions:
+        dt = datetime.fromtimestamp(s["time_created"] / 1000)
+        src_label = f"[{s['source'][:2].upper()}]" # [OP] or [CO]
+        print(f"  {dt.strftime('%Y-%m-%d %H:%M')}  {src_label}  {s['title']}")
+        print(f"    id: {s['session_id']}")
+    print(f"\n{len(sessions)} session(s) found.")
+
+def cmd_export(args, sources):
+    title_query = args.title
+    matches = find_all_matches(title_query, sources)
+    
+    if not matches:
+        print(f"No sessions found matching: '{title_query}'", file=sys.stderr)
+        print("Use --list to see recent sessions.", file=sys.stderr)
+        sys.exit(1)
+
+    if len(matches) > 1 and not args.all:
+        print(f"Found {len(matches)} matching sessions:")
+        for i, m in enumerate(matches):
+            dt = datetime.fromtimestamp(m["time_created"] / 1000)
+            src_label = f"[{m['source'][:2].upper()}]"
+            print(f"  [{i + 1}] {dt.strftime('%Y-%m-%d %H:%M')}  {src_label}  {m['title']}  ({m['session_id']})")
+        print()
+        if sys.stdin.isatty():
+            choice = input("Export which? (number, 'a' for all, Enter for most recent): ").strip()
+            if choice.lower() == "a":
+                pass  # export all
+            elif choice.isdigit() and 1 <= int(choice) <= len(matches):
+                matches = [matches[int(choice) - 1]]
+            else:
+                matches = [matches[0]]
+        else:
+            print("Multiple matches — exporting most recent. Use --all for all.", file=sys.stderr)
+            matches = [matches[0]]
+
+    for match in matches:
+        if match['source'] == 'opencode':
+            opencode_mod._export_one(match, args)
+        else:
+            copilot_mod._export_one(match, args)
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="ai-chat-export",
+        description="Unified exporter for OpenCode and Copilot chat sessions to Markdown.",
+    )
+
+    parser.add_argument("title", nargs="?", help="Session title or ID (partial match)")
+    parser.add_argument("--source", "-s", choices=["all", "opencode", "copilot"], default="all",
+                        help="Which exporter to use (default: all)")
+    parser.add_argument("--output", "-o", help="Output file path (overrides Obsidian dir)")
+    parser.add_argument("--all", "-a", action="store_true", help="Export all matches")
+    parser.add_argument("--list", "-l", action="store_true", help="List recent sessions")
+    parser.add_argument("--days", "-d", type=int, default=7, help="Days to look back (default: 7)")
+
+    args = parser.parse_args()
+
+    sources = ["opencode", "copilot"] if args.source == "all" else [args.source]
+
+    if args.list:
+        cmd_list(args, sources)
+    elif args.title:
+        cmd_export(args, sources)
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()
