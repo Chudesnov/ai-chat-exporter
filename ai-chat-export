@@ -18,6 +18,7 @@ def load_module(name, path):
 script_dir = os.path.dirname(os.path.realpath(__file__))
 opencode_mod = load_module("opencode_export", os.path.join(script_dir, "opencode-chat-export"))
 copilot_mod = load_module("copilot_export", os.path.join(script_dir, "copilot-chat-export"))
+claude_mod = load_module("claude_export", os.path.join(script_dir, "claude-code-chat-export"))
 
 def normalize_copilot(session):
     # Copilot uses 'last_message', opencode uses 'time_created'
@@ -29,12 +30,18 @@ def normalize_opencode(session):
     session['source'] = 'opencode'
     return session
 
+def normalize_claude(session):
+    session['source'] = 'claude'
+    return session
+
 def get_all_recent_sessions(days, sources):
     sessions = []
     if "opencode" in sources:
         sessions.extend([normalize_opencode(s) for s in opencode_mod.list_recent_sessions(days)])
     if "copilot" in sources:
         sessions.extend([normalize_copilot(s) for s in copilot_mod.list_recent_sessions(days)])
+    if "claude" in sources:
+        sessions.extend([normalize_claude(s) for s in claude_mod.list_recent_sessions(days)])
     
     sessions.sort(key=lambda x: x['time_created'], reverse=True)
     return sessions
@@ -45,6 +52,8 @@ def find_all_matches(query, sources):
         matches.extend([normalize_opencode(s) for s in opencode_mod.find_sessions_by_title(query)])
     if "copilot" in sources:
         matches.extend([normalize_copilot(s) for s in copilot_mod.find_sessions_by_title(query)])
+    if "claude" in sources:
+        matches.extend([normalize_claude(s) for s in claude_mod.find_sessions_by_title(query)])
         
     matches.sort(key=lambda x: x['time_created'], reverse=True)
     return matches
@@ -94,17 +103,19 @@ def cmd_export(args, sources):
     for match in matches:
         if match['source'] == 'opencode':
             opencode_mod._export_one(match, args)
-        else:
+        elif match['source'] == 'copilot':
             copilot_mod._export_one(match, args)
+        elif match['source'] == 'claude':
+            claude_mod._export_one(match, args)
 
 def main():
     parser = argparse.ArgumentParser(
         prog="ai-chat-export",
-        description="Unified exporter for OpenCode and Copilot chat sessions to Markdown.",
+        description="Unified exporter for OpenCode, Copilot, and Claude Code chat sessions to Markdown.",
     )
 
     parser.add_argument("title", nargs="?", help="Session title or ID (partial match)")
-    parser.add_argument("--source", "-s", choices=["all", "opencode", "copilot"], default="all",
+    parser.add_argument("--source", "-s", choices=["all", "opencode", "copilot", "claude"], default="all",
                         help="Which exporter to use (default: all)")
     parser.add_argument("--output", "-o", help="Output file path (overrides Obsidian dir)")
     parser.add_argument("--all", "-a", action="store_true", help="Export all matches")
@@ -113,7 +124,7 @@ def main():
 
     args = parser.parse_args()
 
-    sources = ["opencode", "copilot"] if args.source == "all" else [args.source]
+    sources = ["opencode", "copilot", "claude"] if args.source == "all" else [args.source]
 
     if args.list:
         cmd_list(args, sources)

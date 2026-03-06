@@ -1,0 +1,344 @@
+#!/usr/bin/env python3
+"""
+claude-code-chat-export — Export Claude Code (Anthropic.claude-code) chat sessions to Markdown.
+
+Usage:
+    claude-code-chat-export "Session Title"          # Exact or partial title match
+    claude-code-chat-export --list                   # List recent sessions
+    claude-code-chat-export --list --days 7          # List sessions from last 7 days
+    claude-code-chat-export --output /path/to/file.md "Title"
+
+Outputs Markdown to:
+    <OBSIDIAN_DIR>/<sanitized-title>.md
+"""
+
+import argparse
+import json
+import os
+import re
+import sys
+import glob
+from datetime import datetime
+
+# ── Configuration ──────────────────────────────────────────────────────────────
+
+CLAUDE_PROJECTS_DIR = os.path.expanduser("~/.claude/projects")
+DEFAULT_OBSIDIAN_DIR = os.environ.get(
+    "OBSIDIAN_DIR",
+    os.path.expanduser("~/Notes/Main/Claude Chat Archive"),
+)
+
+# ── Extraction Helpers ─────────────────────────────────────────────────────────
+
+def clean_user_text(text: str) -> str:
+    # Remove large IDE selections or caveat blocks for the title
+    text = re.sub(r'<ide_selection>.*?</ide_selection>', '', text, flags=re.DOTALL)
+    text = re.sub(r'<local-command-caveat>.*?</local-command-caveat>', '', text, flags=re.DOTALL)
+    text = re.sub(r'<command-name>.*?</command-name>', '', text, flags=re.DOTALL)
+    text = re.sub(r'<command-message>.*?</command-message>', '', text, flags=re.DOTALL)
+    text = re.sub(r'<command-args>.*?</command-args>', '', text, flags=re.DOTALL)
+    text = re.sub(r'<local-command-stdout>.*?</local-command-stdout>', '', text, flags=re.DOTALL)
+    
+    # Do not strip all XML tags, just the specific wrapper ones we want to hide in user messages
+    text = re.sub(r'</?ide_selection>', '', text)
+    text = re.sub(r'</?local-command-caveat>', '', text)
+    return text.strip()
+
+def extract_user_content(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        texts = []
+        for item in content:
+            if item.get("type") == "text" and "text" in item:
+                texts.append(item["text"])
+        return "\n".join(texts)
+    return ""
+
+def _parse_jsonl_file(filepath: str) -> dict:
+    """Read a Claude session JSONL file and reconstruct turns."""
+    turns = []
+    current_turn = {"user": [], "assistant": [], "tools": []}
+    
+    first_user_msg = ""
+    last_role = None
+    session_id = os.path.basename(filepath).replace(".jsonl", "")
+    created_ts = 0
+
+    with open(filepath, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+                
+            msg_type = data.get("type")
+            if msg_type not in ("user", "assistant"):
+                continue
+                
+            msg = data.get("message", {})
+            role = msg.get("role")
+            
+            ts_str = data.get("timestamp")
+            if ts_str:
+                try:
+                    # Convert 2026-03-06T18:41:56.581Z to ms
+                    dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                    ts = int(dt.timestamp() * 1000)
+                    if created_ts == 0:
+                        created_ts = ts
+                except Exception:
+                    ts = created_ts
+
+            if role == "user":
+                content = msg.get("content", "")
+                
+                # Check if it's a tool result
+                is_tool_result = False
+                if isinstance(content, list):
+                    if len(content) > 0 and content[0].get("type") == "tool_result":
+                        is_tool_result = True
+                
+                if not is_tool_result:
+                    if current_turn["user"] and last_role == "assistant":
+                        # new turn boundary
+                        turns.append(current_turn)
+                        current_turn = {"user": [], "assistant": [], "tools": []}
+                    
+                    text = extract_user_content(content)
+                    if text:
+                        if data.get("isMeta"):
+                            # It's an IDE metadata message. You can optionally omit this from output,
+                            # but for now we include it as context. Just don't use it as the title.
+                            current_turn["user"].append(f"_Meta: {text}_")
+                        else:
+                            current_turn["user"].append(text)
+                            
+                        clean_text = clean_user_text(text)
+                        if not first_user_msg and clean_text and not data.get("isMeta"):
+                            first_user_msg = clean_text.split("\n")[0][:100]
+
+            elif role == "assistant":
+                content = msg.get("content", [])
+                if isinstance(content, list):
+                    for item in content:
+                        if item.get("type") == "text":
+                            current_turn["assistant"].append(item.get("text", ""))
+                        elif item.get("type") == "tool_use":
+                            current_turn["tools"].append({
+                                "name": item.get("name", "unknown"),
+                                "input": item.get("input", {})
+                            })
+                            
+            last_role = role
+
+    if current_turn["user"] or current_turn["assistant"] or current_turn["tools"]:
+        turns.append(current_turn)
+        
+    title = first_user_msg or "Untitled Claude Session"
+    if len(title) > 80:
+        title = title[:77] + "..."
+
+    return {
+        "session_id": session_id,
+        "title": title,
+        "time_created": created_ts,
+        "turns": turns,
+        "jsonl_size": os.path.getsize(filepath),
+        "jsonl_path": filepath
+    }
+
+def get_all_sessions() -> list[dict]:
+    sessions = []
+    if not os.path.exists(CLAUDE_PROJECTS_DIR):
+        return sessions
+        
+    pattern = os.path.join(CLAUDE_PROJECTS_DIR, "*", "*.jsonl")
+    for filepath in glob.glob(pattern):
+        # Only parse if file has some size
+        if os.path.getsize(filepath) < 100:
+            continue
+        try:
+            s = _parse_jsonl_file(filepath)
+            if s and s["turns"]:
+                sessions.append(s)
+        except Exception as e:
+            pass
+    
+    sessions.sort(key=lambda x: x["time_created"], reverse=True)
+    return sessions
+
+def list_recent_sessions(days: int = 7) -> list[dict]:
+    cutoff = (datetime.now().timestamp() - days * 86400) * 1000
+    sessions = get_all_sessions()
+    return [s for s in sessions if s["time_created"] >= cutoff]
+
+def find_sessions_by_title(query: str) -> list[dict]:
+    sessions = get_all_sessions()
+    query_lower = query.lower()
+    return [s for s in sessions if query_lower in s["title"].lower() or query_lower in s["session_id"].lower()]
+
+# ── Markdown Rendering ─────────────────────────────────────────────────────────
+
+def render_markdown(session: dict) -> str:
+    title = session.get("title", "Untitled Claude Session")
+    session_id = session.get("session_id", "unknown")
+    time_created = session.get("time_created", 0)
+    turns = session.get("turns", [])
+    
+    lines = []
+    lines.append("---")
+    lines.append(f"title: \"{title}\"")
+    lines.append(f"session_id: \"{session_id}\"")
+    if time_created:
+        dt = datetime.fromtimestamp(time_created / 1000)
+        lines.append(f"date: {dt.strftime('%Y-%m-%d')}")
+        lines.append(f"created: {dt.strftime('%Y-%m-%dT%H:%M:%S')}")
+    lines.append(f"turns: {len(turns)}")
+    lines.append(f"tags: [claude-chat]")
+    lines.append("---")
+    lines.append("")
+    lines.append(f"# {title}")
+    lines.append("")
+
+    for idx, turn in enumerate(turns):
+        lines.append(f"## Turn {idx + 1}")
+        lines.append("")
+        
+        if turn["user"]:
+            lines.append("### User")
+            lines.append("")
+            for text in turn["user"]:
+                lines.append(text)
+                lines.append("")
+
+        if turn["tools"]:
+            lines.append(f"> [!info]- Tool Calls ({len(turn['tools'])})")
+            lines.append("> ")
+            for tc in turn["tools"]:
+                tool_name = tc["name"]
+                tool_input = json.dumps(tc["input"], ensure_ascii=False)
+                if len(tool_input) > 250:
+                    tool_input = tool_input[:247] + "..."
+                tc_str = f"**{tool_name}**: `{tool_input}`"
+                tc_lines = tc_str.split('\n')
+                lines.append(f"> - {tc_lines[0]}")
+                for tcl in tc_lines[1:]:
+                    lines.append(f">   {tcl}")
+            lines.append("")
+
+        if turn["assistant"]:
+            lines.append("### Assistant")
+            lines.append("")
+            for text in turn["assistant"]:
+                lines.append(text)
+                lines.append("")
+
+        lines.append("---")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+# ── File Output ────────────────────────────────────────────────────────────────
+
+def sanitize_filename(title: str) -> str:
+    name = re.sub(r'[<>:"/\\|?*]', "", title)
+    name = re.sub(r"\s+", " ", name).strip()
+    if len(name) > 120:
+        name = name[:120].rsplit(" ", 1)[0]
+    return name
+
+# ── CLI ────────────────────────────────────────────────────────────────────────
+
+def cmd_list(args):
+    sessions = list_recent_sessions(days=args.days)
+    if not sessions:
+        print("No sessions found.")
+        return
+
+    print(f"Sessions from the last {args.days} day(s):\n")
+    for s in sessions:
+        dt = datetime.fromtimestamp(s["time_created"] / 1000)
+        print(f"  {dt.strftime('%Y-%m-%d %H:%M')}  {s['title']}")
+        print(f"    id: {s['session_id']}")
+    print(f"\n{len(sessions)} session(s) found.")
+
+
+def cmd_export(args):
+    title_query = args.title
+    matches = find_sessions_by_title(title_query)
+    
+    if not matches:
+        print(f"No sessions found matching: '{title_query}'", file=sys.stderr)
+        print("Use --list to see recent sessions.", file=sys.stderr)
+        sys.exit(1)
+
+    if len(matches) > 1 and not args.all:
+        print(f"Found {len(matches)} matching sessions:")
+        for i, m in enumerate(matches):
+            dt = datetime.fromtimestamp(m["time_created"] / 1000)
+            print(f"  [{i + 1}] {dt.strftime('%Y-%m-%d %H:%M')}  {m['title']}  ({m['session_id']})")
+        print()
+        if sys.stdin.isatty():
+            choice = input("Export which? (number, 'a' for all, Enter for most recent): ").strip()
+            if choice.lower() == "a":
+                pass
+            elif choice.isdigit() and 1 <= int(choice) <= len(matches):
+                matches = [matches[int(choice) - 1]]
+            else:
+                matches = [matches[0]]
+        else:
+            print("Multiple matches — exporting most recent. Use --all for all.", file=sys.stderr)
+            matches = [matches[0]]
+
+    for match in matches:
+        _export_one(match, args)
+
+def _export_one(match: dict, args):
+    print(f"Exporting: {match['title']} ({match['session_id']})…")
+    md = render_markdown(match)
+
+    if args.output:
+        out_path = args.output
+    else:
+        out_dir = DEFAULT_OBSIDIAN_DIR
+        os.makedirs(out_dir, exist_ok=True)
+        filename = sanitize_filename(match["title"]) + ".md"
+        out_path = os.path.join(out_dir, filename)
+
+    with open(out_path, "w") as f:
+        f.write(md)
+
+    turns = match.get("turns", [])
+    total_response = sum(sum(len(t) for t in turn["assistant"]) for turn in turns)
+    total_tools = sum(len(turn["tools"]) for turn in turns)
+
+    print(f"  → {out_path}")
+    print(f"  {len(turns)} turns, {total_response:,} chars of response, {total_tools} tool calls")
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="claude-code-chat-export",
+        description="Export Claude Code chat sessions to Markdown for Obsidian.",
+    )
+    parser.add_argument("title", nargs="?", help="Session title or ID (partial match)")
+    parser.add_argument("--output", "-o", help="Output file path (overrides Obsidian dir)")
+    parser.add_argument("--all", "-a", action="store_true", help="Export all matches")
+    parser.add_argument("--list", "-l", action="store_true", help="List recent sessions")
+    parser.add_argument("--days", "-d", type=int, default=7, help="Days to look back (default: 7)")
+
+    args = parser.parse_args()
+
+    if args.list:
+        cmd_list(args)
+    elif args.title:
+        cmd_export(args)
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()
