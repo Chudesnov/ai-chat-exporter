@@ -121,14 +121,15 @@ Files smaller than 100 bytes are ignored to skip empty or trivial session files.
 
 ### Turn Parsing and Boundaries
 The parser reads each line of the JSONL file, ignoring lines where `type` is not `"user"` or `"assistant"`.
-- A session's overall `time_created` is extracted by converting the first encountered ISO timestamp (e.g., `2026-03-06T18:41:56.581Z`) to epoch milliseconds.
+- A session's overall `time_created` is extracted by converting the first encountered ISO timestamp (e.g., `2026-03-06T18:41:56.581Z`) to epoch milliseconds. If a timestamp is missing, it is inferred from the file's creation/modification time.
 - Turns are accumulated using a boundary check: whenever a new `"user"` message is encountered, and the previous message was from the `"assistant"`, the current turn is finalized, and a new turn begins.
+- Sessions with 0 turns are no longer strictly filtered out. If a session contains only `file-history-snapshot` events (and thus no user messages), it is included as an "Untitled Claude Session".
 
 ### User Messages & Title Extraction
 When `role` is `"user"`:
 - The content can be a string or a list. If it is a list where the first item is `{"type": "tool_result"}`, the message is treated as a tool execution result and skipped from the main user text flow.
 - Regular user content is extracted from objects with `{"type": "text"}` and joined into a single string.
-- The session title is derived from the first user message. To prevent ugly titles, `clean_user_text()` strips out metadata XML blocks like `<ide_selection>`, `<local-command-caveat>`, `<command-name>`, `<command-message>`, `<command-args>`, and `<local-command-stdout>`.
+- The session title is derived from the first user message. To prevent ugly titles, `clean_user_text()` strips out metadata XML blocks like `<ide_selection>`, `<ide_opened_file>`, `<local-command-caveat>`, `<command-name>`, `<command-message>`, `<command-args>`, and `<local-command-stdout>`.
 - Additionally, if the JSON data indicates `"isMeta": true` (usually IDE context or background messages), the text is excluded from the session title but appended to the turn output as `_Meta: {text}_` for context.
 
 ### Assistant Responses & Tool Calls
