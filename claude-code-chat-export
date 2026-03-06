@@ -33,6 +33,7 @@ DEFAULT_OBSIDIAN_DIR = os.environ.get(
 def clean_user_text(text: str) -> str:
     # Remove large IDE selections or caveat blocks for the title
     text = re.sub(r'<ide_selection>.*?</ide_selection>', '', text, flags=re.DOTALL)
+    text = re.sub(r'<ide_opened_file>.*?</ide_opened_file>', '', text, flags=re.DOTALL)
     text = re.sub(r'<local-command-caveat>.*?</local-command-caveat>', '', text, flags=re.DOTALL)
     text = re.sub(r'<command-name>.*?</command-name>', '', text, flags=re.DOTALL)
     text = re.sub(r'<command-message>.*?</command-message>', '', text, flags=re.DOTALL)
@@ -41,6 +42,7 @@ def clean_user_text(text: str) -> str:
     
     # Do not strip all XML tags, just the specific wrapper ones we want to hide in user messages
     text = re.sub(r'</?ide_selection>', '', text)
+    text = re.sub(r'</?ide_opened_file>', '', text)
     text = re.sub(r'</?local-command-caveat>', '', text)
     return text.strip()
 
@@ -75,13 +77,6 @@ def _parse_jsonl_file(filepath: str) -> dict:
             except json.JSONDecodeError:
                 continue
                 
-            msg_type = data.get("type")
-            if msg_type not in ("user", "assistant"):
-                continue
-                
-            msg = data.get("message", {})
-            role = msg.get("role")
-            
             ts_str = data.get("timestamp")
             if ts_str:
                 try:
@@ -91,7 +86,14 @@ def _parse_jsonl_file(filepath: str) -> dict:
                     if created_ts == 0:
                         created_ts = ts
                 except Exception:
-                    ts = created_ts
+                    pass
+
+            msg_type = data.get("type")
+            if msg_type not in ("user", "assistant"):
+                continue
+                
+            msg = data.get("message", {})
+            role = msg.get("role")
 
             if role == "user":
                 content = msg.get("content", "")
@@ -163,7 +165,10 @@ def get_all_sessions() -> list[dict]:
             continue
         try:
             s = _parse_jsonl_file(filepath)
-            if s and s["turns"]:
+            if s:
+                # Use file creation time if no timestamp found in JSONL
+                if s["time_created"] == 0:
+                    s["time_created"] = int(os.path.getctime(filepath) * 1000)
                 sessions.append(s)
         except Exception as e:
             pass
