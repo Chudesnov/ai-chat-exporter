@@ -1,47 +1,22 @@
-#!/usr/bin/env python3
-"""
-ai-chat-export — Unified frontend for OpenCode and Copilot chat session exporters.
-"""
-
 import argparse
-import os
 import sys
-import importlib.machinery
+import os
 from datetime import datetime
 
-def load_module(name, path):
-    loader = importlib.machinery.SourceFileLoader(name, path)
-    mod = loader.load_module()
-    return mod
-
-# Find the real directory of the file (resolving symlinks)
-script_dir = os.path.dirname(os.path.realpath(__file__))
-opencode_mod = load_module("opencode_export", os.path.join(script_dir, "opencode-chat-export"))
-copilot_mod = load_module("copilot_export", os.path.join(script_dir, "copilot-chat-export"))
-claude_mod = load_module("claude_export", os.path.join(script_dir, "claude-code-chat-export"))
-
-def normalize_copilot(session):
-    # Copilot uses 'last_message', opencode uses 'time_created'
-    session['time_created'] = session.get('last_message', 0)
-    session['source'] = 'copilot'
-    return session
-
-def normalize_opencode(session):
-    session['source'] = 'opencode'
-    return session
-
-def normalize_claude(session):
-    session['source'] = 'claude'
-    return session
+from . import opencode
+from . import copilot
+from . import claude
+from .markdown import render_markdown
+from .utils import sanitize_filename
 
 def get_all_recent_sessions(days, sources):
     sessions = []
     if "opencode" in sources:
-        sessions.extend([normalize_opencode(s) for s in opencode_mod.list_recent_sessions(days)])
+        sessions.extend(opencode.list_recent_sessions(days))
     if "copilot" in sources:
-        sessions.extend([normalize_copilot(s) for s in copilot_mod.list_recent_sessions(days)])
+        sessions.extend(copilot.list_recent_sessions(days))
     if "claude" in sources:
-        sessions.extend([normalize_claude(s) for s in claude_mod.list_recent_sessions(days)])
+        sessions.extend(claude.list_recent_sessions(days))
     
     sessions.sort(key=lambda x: x['time_created'], reverse=True)
     return sessions
@@ -49,11 +24,11 @@ def get_all_recent_sessions(days, sources):
 def find_all_matches(query, sources):
     matches = []
     if "opencode" in sources:
-        matches.extend([normalize_opencode(s) for s in opencode_mod.find_sessions_by_title(query)])
+        matches.extend(opencode.find_sessions_by_title(query))
     if "copilot" in sources:
-        matches.extend([normalize_copilot(s) for s in copilot_mod.find_sessions_by_title(query)])
+        matches.extend(copilot.find_sessions_by_title(query))
     if "claude" in sources:
-        matches.extend([normalize_claude(s) for s in claude_mod.find_sessions_by_title(query)])
+        matches.extend(claude.find_sessions_by_title(query))
         
     matches.sort(key=lambda x: x['time_created'], reverse=True)
     return matches
@@ -67,7 +42,7 @@ def cmd_list(args, sources):
     print(f"Sessions from the last {args.days} day(s):\n")
     for s in sessions:
         dt = datetime.fromtimestamp(s["time_created"] / 1000)
-        src_label = f"[{s['source'][:2].upper()}]" # [OP] or [CO]
+        src_label = f"[{s['source'][:2].upper()}]"
         print(f"  {dt.strftime('%Y-%m-%d %H:%M')}  {src_label}  {s['title']}")
         print(f"    id: {s['session_id']}")
     print(f"\n{len(sessions)} session(s) found.")
@@ -101,12 +76,44 @@ def cmd_export(args, sources):
             matches = [matches[0]]
 
     for match in matches:
-        if match['source'] == 'opencode':
-            opencode_mod._export_one(match, args)
-        elif match['source'] == 'copilot':
-            copilot_mod._export_one(match, args)
-        elif match['source'] == 'claude':
-            claude_mod._export_one(match, args)
+        _export_one(match, args)
+
+def _export_one(match: dict, args):
+    print(f"Exporting: {match['title']} ({match['session_id']})…")
+    
+    # Hydrate the session object
+    if match['source'] == 'opencode':
+        session = opencode.fetch_session_details(match)
+        default_dir = os.path.expanduser("~/Notes/Main/OpenCode Chat Archive")
+    elif match['source'] == 'copilot':
+        session = copilot.fetch_session_details(match)
+        default_dir = os.path.expanduser("~/Notes/Main/Copilot Chat Archive")
+    elif match['source'] == 'claude':
+        session = claude.fetch_session_details(match)
+        default_dir = os.path.expanduser("~/Notes/Main/Claude Chat Archive")
+    else:
+        print(f"Unknown source {match['source']}")
+        return
+
+    md = render_markdown(session)
+
+    if args.output:
+        out_path = args.output
+    else:
+        out_dir = os.environ.get("OBSIDIAN_DIR", default_dir)
+        os.makedirs(out_dir, exist_ok=True)
+        filename = sanitize_filename(match["title"]) + ".md"
+        out_path = os.path.join(out_dir, filename)
+
+    with open(out_path, "w") as f:
+        f.write(md)
+
+    turns = session.get("turns", [])
+    total_response = sum(sum(len(str(t)) for t in turn.get("assistant", [])) for turn in turns)
+    total_tools = sum(len(turn.get("tools", [])) for turn in turns)
+
+    print(f"  → {out_path}")
+    print(f"  {len(turns)} turns, {total_response:,} chars of response, {total_tools} tool calls")
 
 def main():
     parser = argparse.ArgumentParser(
@@ -132,6 +139,3 @@ def main():
         cmd_export(args, sources)
     else:
         parser.print_help()
-
-if __name__ == "__main__":
-    main()
