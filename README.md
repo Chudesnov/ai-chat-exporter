@@ -62,4 +62,4 @@ You can override the base directory globally by setting the `OBSIDIAN_DIR` envir
 
 ## Credits
 
-Built dynamically, iteratively, and cooperatively by **Sasha** and **OpenCode** (the AI assistant) working side-by-side in real time! ✨
+Built dynamically, iteratively, and cooperatively by **Sasha** and **OpenCode** (powered by Google's **Gemini 3.1 Pro Preview**) working side-by-side in real time! ✨
