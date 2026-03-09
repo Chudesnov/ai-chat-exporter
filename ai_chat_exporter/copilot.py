@@ -102,7 +102,7 @@ def _is_completion_marker(entry: dict) -> bool:
     v = entry.get("v")
     return isinstance(v, dict) and "completedAt" in v
 
-def _extract_text_from_response_list(items: list) -> tuple[list[str], list[str]]:
+def _extract_text_from_response_list(items: list) -> tuple[list[str], list[dict]]:
     texts = []
     tools = []
     inline_buf: list[str] = []
@@ -127,12 +127,26 @@ def _extract_text_from_response_list(items: list) -> tuple[list[str], list[str]]
                     texts.append(val.strip())
             else:
                 tool_label = past or inv
+                name = ""
                 if isinstance(tool_label, str) and tool_label.strip():
-                    tools.append(tool_label.strip())
+                    name = tool_label.strip()
                 elif isinstance(tool_label, dict):
                     tv = tool_label.get("value", "")
                     if isinstance(tv, str) and tv.strip():
-                        tools.append(tv.strip())
+                        name = tv.strip()
+                
+                if name:
+                    tool_input = ""
+                    if "resultDetails" in item and isinstance(item["resultDetails"], dict):
+                        tool_input = item["resultDetails"].get("input", "")
+                    elif "toolSpecificData" in item and isinstance(item["toolSpecificData"], dict):
+                        raw_input = item["toolSpecificData"].get("rawInput", {})
+                        if raw_input:
+                            try:
+                                tool_input = json.dumps(raw_input)
+                            except:
+                                pass
+                    tools.append({"name": name, "input": tool_input})
             continue
 
         if "inlineReference" in item and "supportHtml" not in item:
@@ -229,7 +243,11 @@ def parse_session(entries: list[dict], existing_title: str) -> dict:
             e = entries[j]
             v = e.get("v")
             if isinstance(v, list) and len(v) > 0:
-                all_items.extend(v)
+                for item in v:
+                    if isinstance(item, dict) and "response" in item and isinstance(item["response"], list):
+                        all_items.extend(item["response"])
+                    else:
+                        all_items.append(item)
 
         all_texts, all_tools = _extract_text_from_response_list(all_items)
 
@@ -245,9 +263,15 @@ def parse_session(entries: list[dict], existing_title: str) -> dict:
         deduped_tools = []
         seen_tools = set()
         for tc in all_tools:
-            if tc not in seen_tools:
-                deduped_tools.append({"name": tc, "input": ""})
-                seen_tools.add(tc)
+            if isinstance(tc, str):
+                tc_dict = {"name": tc, "input": ""}
+            else:
+                tc_dict = tc
+            
+            key = f"{tc_dict['name']}|{tc_dict['input']}"
+            if key not in seen_tools:
+                deduped_tools.append(tc_dict)
+                seen_tools.add(key)
 
         turns.append(
             {
