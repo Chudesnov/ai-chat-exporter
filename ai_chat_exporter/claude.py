@@ -21,13 +21,26 @@ def clean_user_text(text: str) -> str:
     return text.strip()
 
 def extract_user_content(content) -> str:
+    """Extract readable text from various Claude content shapes.
+
+    Supports:
+    - plain strings
+    - lists of {'type': 'text', 'text': ...}
+    - lists where a single item is {'type': 'title'} or {'type': 'session_title'}
+    """
     if isinstance(content, str):
         return content
     if isinstance(content, list):
         texts = []
         for item in content:
-            if item.get("type") == "text" and "text" in item:
+            if not isinstance(item, dict):
+                continue
+            itype = item.get("type")
+            if itype == "text" and "text" in item:
                 texts.append(item["text"])
+            elif itype in ("title", "session_title") and "text" in item and not item.get("isMeta"):
+                # prefer explicit title-type elements when present
+                return item["text"]
         return "\n".join(texts)
     return ""
 
@@ -39,6 +52,7 @@ def _parse_jsonl_file(filepath: str) -> dict:
     last_role = None
     session_id = os.path.basename(filepath).replace(".jsonl", "")
     created_ts = 0
+    file_title = None
 
     with open(filepath, "r", encoding="utf-8") as f:
         for line in f:
@@ -61,9 +75,23 @@ def _parse_jsonl_file(filepath: str) -> dict:
                     pass
 
             msg_type = data.get("type")
+
+            # capture any explicit title metadata if present on any line (not just user/assistant)
+            if not file_title:
+                # some Claude files include a top-level 'title' field in the first lines
+                maybe_title = (
+                    data.get("title")
+                    or data.get("sessionTitle")
+                    or data.get("session_title")
+                    or data.get("aiTitle")
+                    or data.get("ai_title")
+                )
+                if isinstance(maybe_title, str) and maybe_title.strip():
+                    file_title = maybe_title.strip()[:200]
+
             if msg_type not in ("user", "assistant"):
                 continue
-                
+
             msg = data.get("message", {})
             role = msg.get("role")
 
@@ -108,9 +136,10 @@ def _parse_jsonl_file(filepath: str) -> dict:
     if current_turn["user"] or current_turn["assistant"] or current_turn["tools"]:
         turns.append(current_turn)
         
-    title = first_user_msg or "Untitled Claude Session"
-    if len(title) > 80:
-        title = title[:77] + "..."
+    # Prefer an explicit file title, then the first non-meta user message, then fallback
+    title = file_title or first_user_msg or "Untitled Claude Session"
+    if len(title) > 120:
+        title = title[:117] + "..."
 
     return {
         "session_id": session_id,
