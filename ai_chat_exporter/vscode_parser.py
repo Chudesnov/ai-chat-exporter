@@ -4,6 +4,7 @@ import glob
 import sqlite3
 
 VSCODE_STORAGE = os.path.expanduser("~/Library/Application Support/Code/User/workspaceStorage")
+COPILOT_CLI_STATE_DIR = os.path.expanduser("~/.copilot/session-state")
 
 def iter_workspace_dirs():
     for ws_dir in sorted(glob.glob(os.path.join(VSCODE_STORAGE, "*"))):
@@ -23,6 +24,13 @@ def read_session_index(ws_dir: str) -> dict:
     return {}
 
 def find_vscode_jsonl(session_id: str) -> str | None:
+    core_id = session_id
+    if session_id.startswith("copilotcli:/"):
+        core_id = session_id[len("copilotcli:/"):]
+    cli_path = os.path.join(COPILOT_CLI_STATE_DIR, core_id, "events.jsonl")
+    if os.path.isfile(cli_path):
+        return cli_path
+
     for ws_dir in iter_workspace_dirs():
         entries = read_session_index(ws_dir)
         if session_id in entries:
@@ -112,7 +120,133 @@ def append_json_patch(target, path: list, values: list):
                     current[key] = [] if isinstance(next_key, int) else {}
                 current = current[key]
 
+def parse_copilot_cli_jsonl(filepath: str) -> dict:
+    def extract_message_text(evt) -> str | None:
+        for key in ("message", "content", "text", "query"):
+            val = evt.get(key)
+            if val and isinstance(val, str):
+                return val
+        data = evt.get("data")
+        if isinstance(data, dict):
+            for key in ("message", "content", "text", "query"):
+                val = data.get(key)
+                if val and isinstance(val, str):
+                    return val
+        return None
+
+    def extract_assistant_text(evt) -> str | None:
+        for key in ("message", "content", "text", "response"):
+            val = evt.get(key)
+            if val and isinstance(val, str):
+                return val
+        data = evt.get("data")
+        if isinstance(data, dict):
+            for key in ("message", "content", "text", "response"):
+                val = data.get(key)
+                if val and isinstance(val, str):
+                    return val
+        return None
+
+    turns = []
+    current_turn = None
+    
+    with open(filepath, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                evt = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            
+            evt_type = evt.get("type")
+            if not evt_type and "data" in evt:
+                data = evt.get("data")
+                if isinstance(data, dict):
+                    evt_type = data.get("type")
+            
+            if evt_type == "user.message":
+                if current_turn is not None:
+                    if current_turn["user"] or current_turn["assistant"] or current_turn["tools"]:
+                        turns.append(current_turn)
+                current_turn = {"user": [], "assistant": [], "tools": []}
+                
+                text = extract_message_text(evt)
+                if text:
+                    current_turn["user"].append(text)
+                    
+            elif evt_type == "assistant.message":
+                if current_turn is None:
+                    current_turn = {"user": [], "assistant": [], "tools": []}
+                
+                text = extract_assistant_text(evt)
+                if text:
+                    current_turn["assistant"].append(text)
+            
+            # Extract tool requests if present on any event
+            tool_reqs = evt.get("toolRequests")
+            if not tool_reqs and isinstance(evt.get("data"), dict):
+                tool_reqs = evt["data"].get("toolRequests")
+            
+            if isinstance(tool_reqs, list):
+                if current_turn is None:
+                    current_turn = {"user": [], "assistant": [], "tools": []}
+                for tr in tool_reqs:
+                    if not isinstance(tr, dict):
+                        continue
+                    name = tr.get("name") or tr.get("tool") or tr.get("toolName") or "unknown"
+                    args = tr.get("arguments") or tr.get("input") or tr.get("args") or tr.get("parameters") or {}
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except:
+                            args = {"raw": args}
+                    if not isinstance(args, dict):
+                        args = {"value": args}
+                    
+                    current_turn["tools"].append({
+                        "name": name,
+                        "input": args
+                    })
+                    
+    if current_turn is not None:
+        if current_turn["user"] or current_turn["assistant"] or current_turn["tools"]:
+            turns.append(current_turn)
+            
+    # Deduplicate tools
+    for turn in turns:
+        seen = set()
+        deduped_tools = []
+        for t in turn["tools"]:
+            k = f"{t['name']}|{str(t['input'])}"
+            if k not in seen:
+                seen.add(k)
+                deduped_tools.append(t)
+        turn["tools"] = deduped_tools
+        
+    return {"turns": turns}
+
 def parse_vscode_jsonl(filepath: str) -> dict:
+    # Check if this file is a Copilot CLI event stream
+    is_cli = False
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                evt = json.loads(line)
+                if isinstance(evt, dict):
+                    if "type" in evt or "timestamp" in evt or ("data" in evt and not "kind" in evt):
+                        is_cli = True
+                break
+    except Exception:
+        pass
+
+    if is_cli:
+        return parse_copilot_cli_jsonl(filepath)
+
     state = {}
     
     with open(filepath, "r", encoding="utf-8") as f:
