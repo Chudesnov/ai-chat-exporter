@@ -7,7 +7,7 @@ This document outlines the detailed specifications for the `ai-chat-export` unif
 All individual CLI tools share a common interface and behavior structure for consistency. The `ai-chat-export` script serves as a unified frontend that delegates commands to the specific exporters.
 
 ### Command-Line Arguments & Flags
-- `title` (Positional): The session title to search for. Supports partial matches (case-insensitive for Copilot and Claude, `LIKE %query%` for OpenCode). OpenCode and Claude also support searching by exact session ID.
+- `title` (Positional): The session title to search for. Supports partial matches (case-insensitive for Copilot and Claude, `LIKE %query%` for OpenCode). OpenCode and Claude also support searching by exact session ID. When `--list` is used, this argument filters the listed sessions by title or ID (case-insensitive).
 - `--source`, `-s <source>`: (Only in `ai-chat-export`) Filters which exporter to use. Choices are `all` (default), `opencode`, `copilot`, or `claude`.
 - `--list`, `-l`: Lists recent sessions instead of exporting.
 - `--days`, `-d <int>`: The number of days to look back when listing sessions. Defaults to `7`.
@@ -15,7 +15,7 @@ All individual CLI tools share a common interface and behavior structure for con
 - `--all`, `-a`: If multiple sessions match the `title` query, this flag automatically exports all of them without prompting.
 
 ### Listing Sessions
-When invoked with `--list`, the tools calculate a timestamp cutoff based on `--days`. They retrieve sessions newer than this cutoff and output a sorted list (newest first) displaying the timestamp, source tag, session title, and session ID.
+When invoked with `--list`, the tools calculate a timestamp cutoff based on `--days`. They retrieve sessions newer than this cutoff. If a `title` query is provided, the retrieved sessions are filtered to only those containing the query in their title or session ID (case-insensitive). Finally, they output a sorted list (newest first) displaying the timestamp, source tag, session title, and session ID.
 When using the `ai-chat-export` wrapper, results from all selected sources are merged into a single list, sorted by timestamp descending, and prefixed with a source tag: `[OP]` for OpenCode, `[CO]` for Copilot, and `[CL]` for Claude Code.
 
 ### Searching and Exporting

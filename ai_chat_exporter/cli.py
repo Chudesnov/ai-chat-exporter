@@ -35,11 +35,25 @@ def find_all_matches(query, sources):
 
 def cmd_list(args, sources):
     sessions = get_all_recent_sessions(args.days, sources)
+    if args.title:
+        query = args.title.lower()
+        sessions = [
+            s for s in sessions
+            if query in (s.get("title") or "").lower() or query in (s.get("session_id") or "").lower()
+        ]
+
     if not sessions:
-        print("No sessions found.")
+        if args.title:
+            print(f"No sessions found matching '{args.title}' from the last {args.days} day(s).")
+        else:
+            print("No sessions found.")
         return
 
-    print(f"Sessions from the last {args.days} day(s):\n")
+    if args.title:
+        print(f"Sessions from the last {args.days} day(s) matching '{args.title}':\n")
+    else:
+        print(f"Sessions from the last {args.days} day(s):\n")
+
     for s in sessions:
         dt = datetime.fromtimestamp(s["time_created"] / 1000)
         src_label = f"[{s['source'][:2].upper()}]"
@@ -121,7 +135,7 @@ def main():
         description="Unified exporter for OpenCode, Copilot, and Claude Code chat sessions to Markdown.",
     )
 
-    parser.add_argument("title", nargs="?", help="Session title or ID (partial match)")
+    parser.add_argument("title", nargs="?", help="Session title or ID (partial match, also filters when listing)")
     parser.add_argument("--source", "-s", choices=["all", "opencode", "copilot", "claude"], default="all",
                         help="Which exporter to use (default: all)")
     parser.add_argument("--output", "-o", help="Output file path (overrides Obsidian dir)")
